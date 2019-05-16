@@ -1,0 +1,474 @@
+/*************************************************************************
+	> File Name: slam main function
+	> Author: Juanjuan Ren
+	> Mail: renjuanjuan@yxrobot.com 
+	> Created Time: 2019年05月09日 Time:19:33 星期四
+    > 说明：1、video extracting  2019年05月09日 Time:19:33 星期四
+    2、orb extract points and descriptor 2019年05月09日 Time:20:00 星期四
+    3、extract keyframe 2019年05月10日 Time:10:00 星期五 加入关键帧间隔
+    4、creating vocabulary  2019年05月11日 Time:9:00 星期六
+    5、creating database 2019年05月11日 Time:14:00 星期六
+ ************************************************************************/
+#include "DBoW3/DBoW3.h" 
+#include <opencv2/core/core.hpp>
+#include <opencv2/highgui/highgui.hpp>
+#include <opencv2/features2d/features2d.hpp>
+#include <iostream>
+#include <vector>
+#include <string>
+#include <boost/concept_check.hpp>
+#include "opencv2/video/tracking.hpp"
+#include "slamfunction.h"
+
+using namespace cv;
+using namespace std;
+
+Mat src, frameImg;
+int width;
+int height;
+Mat Scr1,Scr2;
+vector<Point> srcCorner(4);
+vector<Point> dstCorner(4);
+
+bool refineMatchesWithHomography(const std::vector<cv::KeyPoint>& queryKeypoints,
+	const std::vector<cv::KeyPoint>& trainKeypoints,float reprojectionThreshold,
+	std::vector<cv::DMatch>& matches,cv::Mat& homography ,int &totalPoint)
+{
+	const int minNumberMatchesAllowed = 4;
+	if (matches.size() < minNumberMatchesAllowed)
+		return false;
+	// Prepare data for cv::findHomography  
+	std::vector<cv::Point2f> queryPoints(matches.size());
+	std::vector<cv::Point2f> trainPoints(matches.size());
+	for (size_t i = 0; i < matches.size(); i++)
+	{
+		queryPoints[i] = queryKeypoints[matches[i].queryIdx].pt;
+		trainPoints[i] = trainKeypoints[matches[i].trainIdx].pt;
+	}
+	// Find homography matrix and get inliers mask  
+	std::vector<unsigned char> inliersMask(matches.size());
+	homography = cv::findHomography(queryPoints,trainPoints,CV_FM_RANSAC,reprojectionThreshold,inliersMask);
+	std::vector<cv::DMatch> inliers;
+	for (size_t i = 0; i<inliersMask.size(); i++)
+	{
+		if (inliersMask[i])
+			inliers.push_back(matches[i]);
+	}
+	matches.swap(inliers);
+	Mat homoShow;
+	  drawMatches(src, queryKeypoints, frameImg, trainKeypoints, matches, homoShow, Scalar::all(-1), CV_RGB(255, 255, 255), Mat(), 2);
+	  cv::namedWindow("homoShow", CV_WINDOW_NORMAL);
+	  imshow("homoShow", homoShow);
+
+	totalPoint = matches.size();
+
+	return matches.size() > minNumberMatchesAllowed;
+
+}
+
+
+bool matchingDescriptor(const vector<KeyPoint>& queryKeyPoints, const vector<KeyPoint>& trainKeyPoints,
+	const Mat& queryDescriptors, const Mat& trainDescriptors,
+	vector<DMatch>& m_Matches, int &totalPoint,bool enableRatioTest = 0)///true
+{
+	//vector<vector<DMatch>> m_knnMatches;
+	//vector<DMatch>m_Matches;
+
+	/*if (enableRatioTest)
+	{
+		cout << "KNN Matching" << endl;
+		const float minRatio = 1.f / 1.5f;
+		descriptorMatcher->knnMatch(queryDescriptors, trainDescriptors, m_knnMatches, 2);
+		for (size_t i = 0; i<m_knnMatches.size(); i++)
+		{
+			const cv::DMatch& bestMatch = m_knnMatches[i][0];
+			const cv::DMatch& betterMatch = m_knnMatches[i][1];
+			float distanceRatio = bestMatch.distance / betterMatch.distance;
+			if (distanceRatio < minRatio)
+			{
+				m_Matches.push_back(bestMatch);
+			}
+		}
+	}
+	else
+	{*/
+		//cout << "Cross-Check" << endl;
+		Ptr<cv::DescriptorMatcher> BFMatcher(new cv::BFMatcher(cv::NORM_HAMMING, true));
+		BFMatcher->match(queryDescriptors, trainDescriptors, m_Matches);
+		
+		//可视化
+		///*
+		Mat ShowMatches;
+		drawMatches(src, queryKeyPoints, frameImg, trainKeyPoints, m_Matches, ShowMatches);
+		cv::namedWindow("matches", CV_WINDOW_NORMAL);
+		imshow("matches", ShowMatches);//*/
+		//waitKey(0);
+		//cout << "totalPointm_Matches++++++++++++++++++++++++" << m_Matches.size()<< endl;
+	//}
+
+	Mat homo;
+	float homographyReprojectionThreshold = 3.0;
+	bool homographyFound = refineMatchesWithHomography(
+		queryKeyPoints, trainKeyPoints, homographyReprojectionThreshold, m_Matches, homo , totalPoint);
+
+	if (!homographyFound)
+		return false;
+	else
+	{
+		double h[9];
+		bool isFound = true;
+		h[0] = homo.at<double>(0, 0);
+		h[1] = homo.at<double>(0, 1);
+		h[2] = homo.at<double>(0, 2);
+		h[3] = homo.at<double>(1, 0);
+		h[4] = homo.at<double>(1, 1);
+		h[5] = homo.at<double>(1, 2);
+		h[6] = homo.at<double>(2, 0);
+		h[7] = homo.at<double>(2, 1);
+		h[8] = homo.at<double>(2, 2);
+		/*printf("homo\n"
+			"%f %f %f\n"
+			"%f %f %f\n"
+			"%f %f %f\n",
+			homo.at<double>(0, 0), homo.at<double>(0, 1), homo.at<double>(0, 2),
+			homo.at<double>(1, 0), homo.at<double>(1, 1), homo.at<double>(1, 2),
+			homo.at<double>(2, 0), homo.at<double>(2, 1), homo.at<double>(2, 2));*/
+		for (int i = 0; i<4; i++)
+		{
+			float x = (float)srcCorner[i].x;
+			float y = (float)srcCorner[i].y;
+			float Z = (float)1. / (h[6] * x + h[7] * y + h[8]);
+			float X = (float)(h[0] * x + h[1] * y + h[2])*Z;
+			float Y = (float)(h[3] * x + h[4] * y + h[5])*Z;
+			//if(X>=0&&X<width&&Y>=0&&Y<height)
+			{
+				dstCorner[i] = Point(int(X), int(Y));
+			}
+			//else
+			{
+				//isFound &= false;
+			}
+		}
+		if (isFound)
+		{	
+		  line(frameImg, dstCorner[0], dstCorner[1], CV_RGB(255, 0, 0), 2);
+		  line(frameImg, dstCorner[1], dstCorner[2], CV_RGB(255, 0, 0), 2);
+		  line(frameImg, dstCorner[2], dstCorner[3], CV_RGB(255, 0, 0), 2);
+		  line(frameImg, dstCorner[3], dstCorner[0], CV_RGB(255, 0, 0), 2);
+		  return true;
+		}
+		return true;
+	}
+}
+
+int main()
+{
+	int totalpoint = 0;
+	 vector<Mat> descriptors;
+	//VideoCapture cap(0); // open the default camera //cap(0)
+	 VideoCapture cap(2); //打开现有视频
+	cap.open("/home/rjj/SLAM/cameralidarslam/data/outcpp1.avi");//outcpp.avisig.MP4
+	if (!cap.isOpened())  // check if we succeeded
+	{
+		cout << "Can't Open Camera!" << endl;
+		return -1;
+	}
+	Mat frame, grayFrame;
+	
+	char first = 0;
+	if (first == 0)
+	{
+		first = 1;
+		cap >> frame;
+		//frame = frame(Range(100, 960), Range(0, 1280)); //鱼眼相机的 现实的时间删除 20190509
+		cvtColor(frame, src, CV_BGR2GRAY);
+	}
+	//视频第一幅图为基准 20190419
+	width = src.cols;
+	height = src.rows;
+
+	Ptr<DescriptorMatcher> descriptorMatcher;
+        vector<KeyPoint> queryKeypoints;
+	Mat queryDescriptor;
+	VSLAM::Cvslam::Getinstance().computeKeyPointsAndDesp(src,  queryKeypoints, queryDescriptor);
+	//Intial: read the pattern img keyPoint
+
+	//Mat ShowKeypoints1;
+	//drawKeypoints(src, queryKeypoints, ShowKeypoints1);
+	//imshow("Keypoints1", ShowKeypoints1);
+	//waitKey(0);
+
+	srcCorner[0] = Point(0, 0);
+	srcCorner[1] = Point(width, 0);
+	srcCorner[2] = Point(width, height);
+	srcCorner[3] = Point(0, height);
+
+	vector<KeyPoint> trainKeypoints;
+	Mat trainDescriptor;
+
+	char key = 0;
+	int keynum= 1;
+	//int keynum1= 1;
+	int intervalframenum = 0;
+	int intervalkeynum = 0;
+	float  smin = 1; //相连5个帧中最小的
+	int numvalue = 0; //序号 
+        int scopevalue = 0;
+	int tempvalue = 0;
+	int  mymat[3][2] = {0};
+// 	int feapointnum =0;
+	int thvalue =0;
+	
+	//std::vector<std::vector<int>>  mymat;
+	//mymat[0][0] = 0;
+	//mymat[0].push_back(0);
+	
+	while (key != 27)
+	{
+		cap >> frame;
+		//frame = frame(Range(100, 960), Range(0, 1280)); //鱼眼相机的 现实的时间删除 20190509
+		frame.copyTo(frameImg);
+		cvtColor(frame, grayFrame, CV_BGR2GRAY);
+		//imshow("grayFrame", grayFrame);
+		//waitKey(0);
+
+		trainKeypoints.clear();
+		
+		trainDescriptor.setTo(0);
+		VSLAM::Cvslam::Getinstance().computeKeyPointsAndDesp(grayFrame,  trainKeypoints, trainDescriptor);
+		
+		/*Mat ShowKeypoints2;
+		drawKeypoints(grayFrame, trainKeypoints, ShowKeypoints2);
+		imshow("Keypoints2", ShowKeypoints2);
+		waitKey(0);		*/
+               vector<DMatch>m_Matches;
+		if (trainKeypoints.size() != 0)
+		{			
+			bool isFound = matchingDescriptor(queryKeypoints, trainKeypoints, queryDescriptor, trainDescriptor, m_Matches, totalpoint);
+			//imshow("foundImg", frameImg);
+			//imshow("src", src);
+			//waitKey(0);
+			cout << "totalpoint-------------------" << totalpoint<< endl;
+                        cout << "m_Matches.size()--------------------" << m_Matches.size() << endl;
+			 
+			std::vector<cv::Point2f>  queryPoints1(m_Matches.size());
+			std::vector<cv::Point2f> trainPoints1(m_Matches.size());
+                        
+			int  statisticsnum = 0 ; //统计前后图像素大于第一间隔的数目
+			for (int i  = 0 ; i < m_Matches.size()  ; i++ )
+			{
+			   if (  (queryPoints1[i].x  - trainPoints1[i].x)   > int ( width /3 ))
+			   {
+			     statisticsnum ++;			     
+			     if ( statisticsnum > int(m_Matches.size()  /2 ) )
+			     {
+			       break;
+			    }
+			  }
+			}
+			/*
+			//确定采集的特征点个数的多少
+			if( intervalframenum == 0)
+			{
+			    if ( totalpoint <100)
+			    {
+			      thvalue = 10;
+			    }
+			    else{
+			      thvalue = int(0.1*totalpoint);
+			    }
+			}
+			cout << "thvalue--------------------" << thvalue << endl; 
+		*/	
+			
+			if(totalpoint < 50  ) //之前帧与当前帧接近则保留后一个帧作为关键帧 change 50
+			{ 	
+			         intervalframenum++;
+		        	//cout << "intervalframenum ================" << intervalframenum << endl;						        
+
+				 for (size_t i = 0; i < m_Matches.size(); i++)
+				  {
+					  queryPoints1[i] = queryKeypoints[m_Matches[i].queryIdx].pt;
+					  trainPoints1[i] = trainKeypoints[m_Matches[i].trainIdx].pt;
+					  cout << "queryPoints1-------------------" << queryPoints1[i].x  << "\n"<<  queryPoints1[i].y<<  endl;
+					  cout << "trainPoints1-------------------" << trainPoints1[i].x << "\n"<<   trainPoints1[i].y<< endl;
+				  }
+			
+			        cout << "intervalframenum ================" << queryKeypoints.size() << endl;	
+				cout << "intervalframenum ================" << trainKeypoints.size() << endl;	
+				grayFrame.copyTo(src);
+				trainDescriptor.copyTo(queryDescriptor);
+				queryKeypoints = trainKeypoints;
+				//VSLAM::Cvslam::Getinstance().computeKeyPointsAndDesp(src,  queryKeypoints, queryDescriptor);				
+                                	
+				/*//考虑形成词袋 用这种方式
+				String path = "/home/rjj/SLAM/cameralidarslam/data1/" + to_string(keynum1) + ".bmp";
+				imwrite(path, src);
+			        keynum1++;		*/
+				//descriptors.push_back( queryDescriptor ); //描述子集合
+				
+				//考虑检测关键帧进行匹配用这种提取方式 再形成词袋20190511
+				//第一帧保存，5帧以内保存后一帧
+				//帧与帧之间的特征点 位置变换不明显的 不作为关键帧
+				
+				if(intervalkeynum == 0 ) 
+				{
+				   cout << "keynum-----------" << keynum << endl;
+				  String path = "/home/rjj/SLAM/cameralidarslam/data/restro/" + to_string(keynum) + ".bmp";
+				  imwrite(path, src);
+				  keynum++;		
+				  intervalkeynum = intervalframenum;				
+				}
+				else if (intervalframenum - intervalkeynum<5)  //值5需要确定扫地机的速度和取帧的速率 需要test
+				{
+				  String path = "/home/rjj/SLAM/cameralidarslam/data/restro/" + to_string(keynum-1) + ".bmp";
+				  imwrite(path, src);	
+				 //cout << "intervalframenum22222222222222222222" << intervalkeynum << endl;
+				}
+				else
+				{
+				  intervalkeynum = 0;	
+				  intervalframenum = 0;
+				  descriptors.push_back( queryDescriptor ); //关键帧提取后形成词袋描述子集合
+				  //如果关键帧间隔大于20 词袋才开始形成 
+				  if(descriptors.size() > 20)
+				  {
+				      // create vocabulary 
+				      cout<<"creating vocabulary ... "<<endl;
+				      DBoW3::Vocabulary vocab;
+				      vocab.create( descriptors );
+				      cout<<"vocabulary info: "<<vocab<<endl;
+				      vocab.save( "vocabulary.yml.gz" );
+				      cout<<"done"<<endl;
+				      
+				      //词袋形成后进行闭环检测
+				      // we can compare the images directly or we can compare one image to a database 
+				      // images :
+				      cout<<"comparing images with images "<<endl;
+				     // for ( int i=0; i<images.size(); i++ )
+				    //  {
+					  DBoW3::BowVector v1;
+					  vocab.transform( descriptors[descriptors.size()-1], v1 );
+					  for ( int j=0; j<descriptors.size(); j++ )
+					  {
+					      DBoW3::BowVector v2;
+					      vocab.transform( descriptors[j], v2 );
+					      double score = vocab.score(v1, v2);
+					      //cout<<"image "<<descriptors.size()-1 <<" vs image "<<j<<" : "<<score<<endl;
+					     /* if ( (j > descriptors.size() - 7)  &&  (smin > score) ) //往前5个关键帧， 本身不算 大于并没有等于不算
+					      {
+						  smin = score;
+						  cout<<"smin: "<<smin<<endl;
+					      }//找出相连5帧内最小的分数*/
+					  }
+					  cout<<endl;
+				      //}				      
+				      // or with database  数据库  进行排序
+				      cout<<"comparing images with database "<<endl;
+				      DBoW3::Database db( vocab, false, 0);//false
+				      for ( int i=0; i<descriptors.size(); i++ )
+					  db.add(descriptors[i]);
+				      cout<<"database info: "<<db<<endl;
+				      
+				      //一幅图和词袋里的词进行比较
+				     // for ( int i=0; i<descriptors.size(); i++ )
+				     // {
+					  DBoW3::QueryResults ret;
+					  db.query( descriptors[descriptors.size()-1], ret, 5);      // max result=5
+					// cout<<"searching for image "<<descriptors.size()-1<<" returns "<<ret<<endl<<endl;
+					  
+					numvalue = descriptors.size()-1 ;  
+					for(DBoW3::QueryResults::iterator it = ret.begin(); it != ret.end() ;  it++)
+					{
+					   cout << (*it).Id << "\t"<<  (*it).Score<<endl;
+					    if  (numvalue -int( (*it).Id)  > 6) //去掉相邻帧
+					    {
+						if (tempvalue == 0 ) //检测到的第一帧为回环检测第一帧
+						{						 
+						  scopevalue = (*it).Id ;
+						  mymat[tempvalue][0] = scopevalue; //保存对应的序号
+						  mymat[tempvalue][1] = numvalue;
+						  tempvalue ++;
+						}
+						else
+						{
+						    if (abs(int( (*it).Id) - scopevalue)   < 5)
+						    {
+						      scopevalue = (*it).Id ;
+						      mymat[tempvalue][0] = scopevalue;
+						      mymat[tempvalue][1] = numvalue;
+						      
+						     // cout<< " abs( (*it).Id - scopevalue<5 " <<abs( (*it).Id - scopevalue )<< endl;
+						      tempvalue++; //如果当前帧检测的回环帧序号 与上一帧检测的回环帧序号 相差小于5 则 tempvalue 
+						    }	
+						    else
+						    {
+						     // cout<< " abs( (*it).Id - scopevalue>5" <<abs(int((*it).Id) - scopevalue )<< endl;
+						      tempvalue = 0; //否则 即大于5  则tempvalue 重置为 0 ；重新检测回环。
+						    }						   
+					       }	
+					       cout<< " tempvalue++++++++++++++++++ " <<tempvalue<< endl;
+					         while (tempvalue == 3) //tempvalue 的个数超过3 个 即 有连续三个 序号都小于5 ,则可能出现回环
+						{
+						    cout<<"出现回环可能性."<<endl;							  
+						    //进行匹配再次确认
+						    vector<KeyPoint> Keypoints1,Keypoints2;
+						    Mat Descriptor1,Descriptor2;
+						    
+						    int looppoint , loopnum = 0;
+						    for (int i = 0; i<3;i++)
+						    { 
+						      // cout<<"mymat[i][0]+1."<<(mymat[i][0]+1)<<endl;	
+							Scr1 = imread("/home/rjj/SLAM/cameralidarslam/data/restro/" +to_string (mymat[i][0]+1)+".bmp");
+							Scr2 = imread("/home/rjj/SLAM/cameralidarslam/data/restro/" +to_string (mymat[i][1]+1)+".bmp");
+							VSLAM::Cvslam::Getinstance().computeKeyPointsAndDesp(Scr1,  Keypoints1, Descriptor1);
+							VSLAM::Cvslam::Getinstance().computeKeyPointsAndDesp(Scr2,  Keypoints2, Descriptor2);
+							
+							Mat ShowKeoint;
+							drawKeypoints(Scr1, Keypoints1, ShowKeoint);
+							imshow("Keypoints1", ShowKeoint);
+							// waitKey(0);
+							cout << "Keypoints1   00000---" << Keypoints1.size() << endl;
+							
+							Mat ShowKeyp;
+							drawKeypoints(Scr2, Keypoints2, ShowKeyp);
+							imshow("Keypoints2", ShowKeyp);
+						      //waitKey(0);
+							cout << "Keypoints2   00000---" << Keypoints2.size() << endl;
+							
+							bool isFound = matchingDescriptor(Keypoints1, Keypoints2, Descriptor1, Descriptor2, m_Matches, looppoint);
+							//bool isFound = matchingDescriptor1(Scr1,Scr2,Keypoints1, Keypoints2, Descriptor1, Descriptor2, descriptorMatcher, looppoint);
+							cout<<"looppoint====================="<<looppoint<<endl;	
+							if ( looppoint > 10) //匹配的特征点超过50  change 50
+							{
+							  loopnum ++;
+							}					      
+						    }
+						    if (loopnum > 0 )
+						    {
+						      cout<<"回环匹配成功 为回环*****************************************************"<<endl;	
+						    }
+						    else
+						    {
+						      cout<<"回环匹配失败 不是回环"<<endl;	
+						    }
+						    //将tempvalue复制为0 等待20帧以后再次检测回环、或是上层程序要求检测回环再次开启回环						    
+						    tempvalue = 0;
+						}
+					      cout<< " tempvalue============== " <<tempvalue<< endl;
+					      break;
+					    }		  					  
+					}					   
+					//cout<<  ret[0].Id << endl;
+					//cout<<  ret[0].Score << endl;
+    			             // }
+				      cout<<"done."<<endl;				      
+				  }
+				}	
+			}//前后图的跟踪检测与匹配20190419//*/
+		}     
+		key = waitKey(10);
+	}
+
+}
+
